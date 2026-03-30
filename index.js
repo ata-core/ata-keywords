@@ -34,44 +34,54 @@ const CONSTRUCTORS = {
   ArrayBuffer,
 }
 
-const TYPEOF_VALUES = new Set([
-  'undefined', 'string', 'number', 'object',
-  'function', 'boolean', 'symbol', 'bigint',
-])
-
-function checkInstanceof(data, schema) {
-  if (!schema || typeof schema !== 'object') return true
+function collectErrors(data, schema, path, errors) {
+  if (!schema || typeof schema !== 'object') return
   const props = schema.properties
-  if (!props) return true
+  if (!props) return
 
   for (const [key, prop] of Object.entries(props)) {
     if (!prop || typeof prop !== 'object') continue
+    const val = data[key]
+    const currentPath = path ? path + '/' + key : '/' + key
 
     // instanceof keyword
-    if (prop.instanceof) {
-      const val = data[key]
-      if (val === undefined) continue
+    if (prop.instanceof && val !== undefined) {
       const types = Array.isArray(prop.instanceof) ? prop.instanceof : [prop.instanceof]
       let match = false
       for (const t of types) {
         const ctor = CONSTRUCTORS[t]
         if (ctor && val instanceof ctor) { match = true; break }
       }
-      if (!match) return false
+      if (!match) {
+        errors.push({
+          code: 'instanceof_mismatch',
+          path: currentPath,
+          message: 'expected instanceof ' + types.join(' | '),
+        })
+      }
     }
 
     // typeof keyword
-    if (prop.typeof) {
-      const val = data[key]
+    if (prop.typeof && val !== undefined) {
       const types = Array.isArray(prop.typeof) ? prop.typeof : [prop.typeof]
       let match = false
       for (const t of types) {
         if (typeof val === t) { match = true; break }
       }
-      if (!match) return false
+      if (!match) {
+        errors.push({
+          code: 'typeof_mismatch',
+          path: currentPath,
+          message: 'expected typeof ' + types.join(' | '),
+        })
+      }
+    }
+
+    // recurse into nested objects
+    if (prop.properties && val && typeof val === 'object' && !Array.isArray(val)) {
+      collectErrors(val, prop, currentPath, errors)
     }
   }
-  return true
 }
 
 function withKeywords(validator) {
@@ -83,11 +93,10 @@ function withKeywords(validator) {
   const compiledValidate = validator.validate
   validator.validate = function (data) {
     if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
-      if (!checkInstanceof(data, schema)) {
-        return {
-          valid: false,
-          errors: [{ code: 'instanceof_mismatch', path: '', message: 'instanceof check failed' }],
-        }
+      const errors = []
+      collectErrors(data, schema, '', errors)
+      if (errors.length > 0) {
+        return { valid: false, errors }
       }
     }
     return compiledValidate(data)
