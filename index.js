@@ -34,52 +34,58 @@ const CONSTRUCTORS = {
   ArrayBuffer,
 }
 
-function collectErrors(data, schema, path, errors) {
-  if (!schema || typeof schema !== 'object') return
-  const props = schema.properties
-  if (!props) return
-
-  for (const [key, prop] of Object.entries(props)) {
+// Compile-time: build a flat array of checks from schema tree.
+// Only properties with instanceof/typeof get a check. Zero overhead for standard properties.
+function compileChecks(schema, path) {
+  const checks = []
+  if (!schema || typeof schema !== 'object' || !schema.properties) return checks
+  for (const [key, prop] of Object.entries(schema.properties)) {
     if (!prop || typeof prop !== 'object') continue
-    const val = data[key]
     const currentPath = path ? path + '/' + key : '/' + key
 
-    // instanceof keyword
-    if (prop.instanceof && val !== undefined) {
+    if (prop.instanceof) {
       const types = Array.isArray(prop.instanceof) ? prop.instanceof : [prop.instanceof]
-      let match = false
-      for (const t of types) {
-        const ctor = CONSTRUCTORS[t]
-        if (ctor && val instanceof ctor) { match = true; break }
-      }
-      if (!match) {
-        errors.push({
-          code: 'instanceof_mismatch',
-          path: currentPath,
-          message: 'expected instanceof ' + types.join(' | '),
+      const ctors = types.map(t => CONSTRUCTORS[t]).filter(Boolean)
+      if (ctors.length > 0) {
+        const frozenError = Object.freeze({
+          keyword: 'instanceof', instancePath: currentPath, schemaPath: '', params: Object.freeze({ expected: types.join(' | ') }),
+          message: 'expected instanceof ' + types.join(' | ')
         })
+        checks.push({ key, ctors, type: 'instanceof', error: frozenError })
       }
     }
-
-    // typeof keyword
-    if (prop.typeof && val !== undefined) {
+    if (prop.typeof) {
       const types = Array.isArray(prop.typeof) ? prop.typeof : [prop.typeof]
-      let match = false
-      for (const t of types) {
-        if (typeof val === t) { match = true; break }
-      }
-      if (!match) {
-        errors.push({
-          code: 'typeof_mismatch',
-          path: currentPath,
-          message: 'expected typeof ' + types.join(' | '),
-        })
-      }
+      const frozenError = Object.freeze({
+        keyword: 'typeof', instancePath: currentPath, schemaPath: '', params: Object.freeze({ expected: types.join(' | ') }),
+        message: 'expected typeof ' + types.join(' | ')
+      })
+      checks.push({ key, types, type: 'typeof', error: frozenError })
     }
+    // recurse
+    if (prop.properties) {
+      const sub = compileChecks(prop, currentPath)
+      if (sub.length > 0) checks.push({ key, type: 'nested', sub })
+    }
+  }
+  return checks
+}
 
-    // recurse into nested objects
-    if (prop.properties && val && typeof val === 'object' && !Array.isArray(val)) {
-      collectErrors(val, prop, currentPath, errors)
+function runChecks(data, checks, errors) {
+  for (let i = 0; i < checks.length; i++) {
+    const c = checks[i]
+    const val = data[c.key]
+    if (val === undefined) continue
+    if (c.type === 'instanceof') {
+      let match = false
+      for (let j = 0; j < c.ctors.length; j++) { if (val instanceof c.ctors[j]) { match = true; break } }
+      if (!match) errors.push(c.error)
+    } else if (c.type === 'typeof') {
+      let match = false
+      for (let j = 0; j < c.types.length; j++) { if (typeof val === c.types[j]) { match = true; break } }
+      if (!match) errors.push(c.error)
+    } else if (c.type === 'nested' && val && typeof val === 'object' && !Array.isArray(val)) {
+      runChecks(val, c.sub, errors)
     }
   }
 }
@@ -87,14 +93,22 @@ function collectErrors(data, schema, path, errors) {
 function withKeywords(validator) {
   const schema = validator._schemaObj
 
+  // Compile checks once — zero overhead at validation time for properties without custom keywords
+  const checks = compileChecks(schema, '')
+
   // trigger compilation so we can wrap the real validate
   validator.validate({})
 
   const compiledValidate = validator.validate
+  if (checks.length === 0) {
+    // No custom keywords — zero overhead wrapper
+    return validator
+  }
+
   validator.validate = function (data) {
     if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
       const errors = []
-      collectErrors(data, schema, '', errors)
+      runChecks(data, checks, errors)
       if (errors.length > 0) {
         return { valid: false, errors }
       }
