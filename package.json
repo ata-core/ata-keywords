@@ -17,6 +17,6 @@
     "keywords"
   ],
   "peerDependencies": {
-    "ata-validator": "^0.7.3"
+    "ata-validator": "^0.8.0"
   }
 }
