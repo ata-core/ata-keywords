@@ -13,6 +13,10 @@
 //     properties: {
 //       createdAt: { instanceof: 'Date' },
 //       pattern: { instanceof: 'RegExp' },
+//       images: {
+//         type: 'array',
+//         items: { properties: { takenAt: { instanceof: 'Date' } } }
+//       }
 //     }
 //   }))
 
@@ -34,58 +38,91 @@ const CONSTRUCTORS = {
   ArrayBuffer,
 }
 
-// Compile-time: build a flat array of checks from schema tree.
-// Only properties with instanceof/typeof get a check. Zero overhead for standard properties.
-function compileChecks(schema, path) {
-  const checks = []
-  if (!schema || typeof schema !== 'object' || !schema.properties) return checks
-  for (const [key, prop] of Object.entries(schema.properties)) {
-    if (!prop || typeof prop !== 'object') continue
-    const currentPath = path ? path + '/' + key : '/' + key
+// Compile-time: turn a schema node into a flat list of ops that validate a
+// single value. Properties with instanceof/typeof become leaf ops; nested
+// objects (properties), array items, and tuple prefixItems recurse. A schema
+// node with no custom keywords anywhere under it produces no ops, so standard
+// properties stay zero-overhead.
+function compileNode(schema) {
+  const ops = []
+  if (!schema || typeof schema !== 'object') return ops
 
-    if (prop.instanceof) {
-      const types = Array.isArray(prop.instanceof) ? prop.instanceof : [prop.instanceof]
-      const ctors = types.map(t => CONSTRUCTORS[t]).filter(Boolean)
-      if (ctors.length > 0) {
-        const frozenError = Object.freeze({
-          keyword: 'instanceof', instancePath: currentPath, schemaPath: '', params: Object.freeze({ expected: types.join(' | ') }),
-          message: 'expected instanceof ' + types.join(' | ')
-        })
-        checks.push({ key, ctors, type: 'instanceof', error: frozenError })
-      }
-    }
-    if (prop.typeof) {
-      const types = Array.isArray(prop.typeof) ? prop.typeof : [prop.typeof]
-      const frozenError = Object.freeze({
-        keyword: 'typeof', instancePath: currentPath, schemaPath: '', params: Object.freeze({ expected: types.join(' | ') }),
-        message: 'expected typeof ' + types.join(' | ')
-      })
-      checks.push({ key, types, type: 'typeof', error: frozenError })
-    }
-    // recurse
-    if (prop.properties) {
-      const sub = compileChecks(prop, currentPath)
-      if (sub.length > 0) checks.push({ key, type: 'nested', sub })
+  if (schema.instanceof) {
+    const types = Array.isArray(schema.instanceof) ? schema.instanceof : [schema.instanceof]
+    const ctors = types.map((t) => CONSTRUCTORS[t]).filter(Boolean)
+    if (ctors.length > 0) ops.push({ type: 'instanceof', ctors, types })
+  }
+  if (schema.typeof) {
+    const types = Array.isArray(schema.typeof) ? schema.typeof : [schema.typeof]
+    ops.push({ type: 'typeof', types })
+  }
+  if (schema.properties) {
+    for (const [key, prop] of Object.entries(schema.properties)) {
+      const child = compileNode(prop)
+      if (child.length > 0) ops.push({ type: 'prop', key, ops: child })
     }
   }
-  return checks
+  // Single-schema array items: same check applies to every element.
+  if (schema.items && typeof schema.items === 'object' && !Array.isArray(schema.items)) {
+    const item = compileNode(schema.items)
+    if (item.length > 0) ops.push({ type: 'items', ops: item })
+  }
+  // Tuple form: a per-position schema list.
+  if (Array.isArray(schema.prefixItems)) {
+    const tuple = schema.prefixItems.map(compileNode)
+    if (tuple.some((o) => o.length > 0)) ops.push({ type: 'prefixItems', tuple })
+  }
+  return ops
 }
 
-function runChecks(data, checks, errors) {
-  for (let i = 0; i < checks.length; i++) {
-    const c = checks[i]
-    const val = data[c.key]
-    if (val === undefined) continue
-    if (c.type === 'instanceof') {
+// Errors are built at failure time, not compile time: the valid path never
+// allocates, and array elements get a precise instancePath with their index.
+function makeError(keyword, path, types) {
+  const expected = types.join(' | ')
+  return {
+    keyword,
+    instancePath: path,
+    schemaPath: '',
+    params: { expected },
+    message: 'expected ' + keyword + ' ' + expected,
+  }
+}
+
+function runOps(value, ops, path, errors) {
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i]
+    if (op.type === 'instanceof') {
       let match = false
-      for (let j = 0; j < c.ctors.length; j++) { if (val instanceof c.ctors[j]) { match = true; break } }
-      if (!match) errors.push(c.error)
-    } else if (c.type === 'typeof') {
+      for (let j = 0; j < op.ctors.length; j++) {
+        if (value instanceof op.ctors[j]) { match = true; break }
+      }
+      if (!match) errors.push(makeError('instanceof', path, op.types))
+    } else if (op.type === 'typeof') {
       let match = false
-      for (let j = 0; j < c.types.length; j++) { if (typeof val === c.types[j]) { match = true; break } }
-      if (!match) errors.push(c.error)
-    } else if (c.type === 'nested' && val && typeof val === 'object' && !Array.isArray(val)) {
-      runChecks(val, c.sub, errors)
+      for (let j = 0; j < op.types.length; j++) {
+        if (typeof value === op.types[j]) { match = true; break }
+      }
+      if (!match) errors.push(makeError('typeof', path, op.types))
+    } else if (op.type === 'prop') {
+      // Missing properties are ata's job (required); the custom keyword only
+      // constrains present values.
+      if (value && typeof value === 'object') {
+        const v = value[op.key]
+        if (v !== undefined) runOps(v, op.ops, path + '/' + op.key, errors)
+      }
+    } else if (op.type === 'items') {
+      if (Array.isArray(value)) {
+        for (let k = 0; k < value.length; k++) {
+          runOps(value[k], op.ops, path + '/' + k, errors)
+        }
+      }
+    } else if (op.type === 'prefixItems') {
+      if (Array.isArray(value)) {
+        const n = op.tuple.length < value.length ? op.tuple.length : value.length
+        for (let k = 0; k < n; k++) {
+          if (op.tuple[k].length > 0) runOps(value[k], op.tuple[k], path + '/' + k, errors)
+        }
+      }
     }
   }
 }
@@ -93,22 +130,23 @@ function runChecks(data, checks, errors) {
 function withKeywords(validator) {
   const schema = validator._schemaObj
 
-  // Compile checks once — zero overhead at validation time for properties without custom keywords
-  const checks = compileChecks(schema, '')
+  // Compile ops once — zero overhead at validation time for schemas without
+  // any custom keyword.
+  const ops = compileNode(schema)
 
   // trigger compilation so we can wrap the real validate
   validator.validate({})
 
   const compiledValidate = validator.validate
-  if (checks.length === 0) {
-    // No custom keywords — zero overhead wrapper
+  if (ops.length === 0) {
+    // No custom keywords — leave the validator untouched.
     return validator
   }
 
   validator.validate = function (data) {
-    if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+    if (data !== null && typeof data === 'object') {
       const errors = []
-      runChecks(data, checks, errors)
+      runOps(data, ops, '', errors)
       if (errors.length > 0) {
         return { valid: false, errors }
       }

@@ -1,10 +1,13 @@
 {
   "name": "@ata-project/keywords",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Custom keywords for ata-validator (instanceof, typeof)",
   "main": "index.js",
   "types": "index.d.ts",
   "license": "MIT",
+  "scripts": {
+    "test": "node test.js"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/ata-core/ata-keywords"
@@ -17,6 +20,6 @@
     "keywords"
   ],
   "peerDependencies": {
-    "ata-validator": "^0.9.3"
+    "ata-validator": ">=0.9.3"
   }
 }

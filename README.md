@@ -59,6 +59,27 @@ Checks `typeof data`. Supported values:
 { typeof: ['string', 'number'] }
 ```
 
+### Nested and array schemas
+
+`instanceof` and `typeof` are checked wherever they appear in the schema, not
+only on top-level properties. Nested objects (`properties`), array elements
+(`items`), and tuples (`prefixItems`) all recurse:
+
+```js
+const v = withKeywords(new Validator({
+  type: 'object',
+  properties: {
+    images: {
+      type: 'array',
+      items: { properties: { takenAt: { instanceof: 'Date' } } }
+    }
+  }
+}))
+
+v.validate({ images: [{ takenAt: new Date() }] })   // valid
+v.validate({ images: [{ takenAt: 'nope' }] })        // invalid, path /images/0/takenAt
+```
+
 ### Custom constructors
 
 ```js
