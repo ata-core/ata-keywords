@@ -7,14 +7,14 @@ Similar to [ajv-keywords](https://github.com/ajv-validator/ajv-keywords) for ajv
 ## Install
 
 ```bash
-npm install ata-keywords
+npm install @ata-project/keywords
 ```
 
 ## Usage
 
 ```js
 const { Validator } = require('ata-validator')
-const { withKeywords } = require('ata-keywords')
+const { withKeywords } = require('@ata-project/keywords')
 
 const v = withKeywords(new Validator({
   type: 'object',
@@ -80,10 +80,20 @@ v.validate({ images: [{ takenAt: new Date() }] })   // valid
 v.validate({ images: [{ takenAt: 'nope' }] })        // invalid, path /images/0/takenAt
 ```
 
+### Which calls are checked
+
+The custom keywords run on every entry point that reports validity, not only
+`validate()`: `isValidObject()`, `validateJSON()`, `isValidJSON()`,
+`validateAndParse()` and the Standard Schema interface all apply them.
+
+The JSON entry points check the parsed value, so `instanceof` on JSON text
+rejects: parsed JSON holds plain objects, never class instances. Use `typeof`
+for constraints that JSON input can satisfy.
+
 ### Custom constructors
 
 ```js
-const { withKeywords, CONSTRUCTORS } = require('ata-keywords')
+const { withKeywords, CONSTRUCTORS } = require('@ata-project/keywords')
 
 class MyClass {}
 CONSTRUCTORS.MyClass = MyClass

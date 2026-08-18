@@ -1,6 +1,6 @@
 {
   "name": "@ata-project/keywords",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Custom keywords for ata-validator (instanceof, typeof)",
   "main": "index.js",
   "types": "index.d.ts",
@@ -21,5 +21,8 @@
   ],
   "peerDependencies": {
     "ata-validator": ">=0.9.3"
+  },
+  "devDependencies": {
+    "ata-validator": "^1.6.1"
   }
 }

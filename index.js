@@ -134,24 +134,80 @@ function withKeywords(validator) {
   // any custom keyword.
   const ops = compileNode(schema)
 
-  // trigger compilation so we can wrap the real validate
-  validator.validate({})
-
-  const compiledValidate = validator.validate
   if (ops.length === 0) {
     // No custom keywords — leave the validator untouched.
     return validator
   }
 
-  validator.validate = function (data) {
-    if (data !== null && typeof data === 'object') {
-      const errors = []
-      runOps(data, ops, '', errors)
-      if (errors.length > 0) {
-        return { valid: false, errors }
-      }
+  // Warm each entry point before capturing it. A validator installs its
+  // compiled function on the instance during the first call, so a function
+  // captured earlier is the lazy stub, and that stub would overwrite this
+  // wrapper the first time it ran.
+  const inner = {}
+  for (const name of ['validate', 'isValidObject', 'validateJSON', 'isValidJSON', 'validateAndParse']) {
+    if (typeof validator[name] !== 'function') continue
+    try {
+      validator[name](name === 'validate' || name === 'isValidObject' ? {} : '{}')
+    } catch {
+      // Entry points that need the native addon throw when it is absent.
+      // Leave those alone rather than wrapping a function nobody can call.
+      continue
     }
-    return compiledValidate(data)
+    inner[name] = validator[name]
+  }
+
+  // Shared by every entry point: the custom keywords decide first, and only a
+  // clean pass hands the value to the validator itself.
+  function keywordErrors(data) {
+    if (data === null || typeof data !== 'object') return null
+    const errors = []
+    runOps(data, ops, '', errors)
+    return errors.length > 0 ? errors : null
+  }
+
+  validator.validate = function (data) {
+    const errors = keywordErrors(data)
+    if (errors) return { valid: false, errors }
+    return inner.validate(data)
+  }
+
+  if (inner.isValidObject) {
+    validator.isValidObject = function (data) {
+      if (keywordErrors(data)) return false
+      return inner.isValidObject(data)
+    }
+  }
+
+  // The JSON entry points take text, so the parsed value is what the keywords
+  // have to see. Parsing happens only after the schema itself accepts, which
+  // keeps the cost off the rejecting path.
+  if (inner.validateJSON) {
+    validator.validateJSON = function (jsonStr) {
+      const res = inner.validateJSON(jsonStr)
+      if (!res.valid) return res
+      let data
+      try { data = JSON.parse(jsonStr) } catch { return res }
+      const errors = keywordErrors(data)
+      return errors ? { valid: false, errors } : res
+    }
+  }
+
+  if (inner.isValidJSON) {
+    validator.isValidJSON = function (jsonStr) {
+      if (!inner.isValidJSON(jsonStr)) return false
+      let data
+      try { data = JSON.parse(jsonStr) } catch { return true }
+      return !keywordErrors(data)
+    }
+  }
+
+  if (inner.validateAndParse) {
+    validator.validateAndParse = function (jsonStr) {
+      const res = inner.validateAndParse(jsonStr)
+      if (!res.valid) return res
+      const errors = keywordErrors(res.value)
+      return errors ? { valid: false, value: res.value, errors } : res
+    }
   }
 
   return validator

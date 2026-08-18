@@ -106,4 +106,39 @@ function ok(name, cond) {
   ok('no keywords: standard validation still rejects', v.validate({ n: 'x' }).valid === false)
 }
 
+
+// 9. every entry point agrees with validate(), not just validate()
+{
+  const v = withKeywords(new Validator({
+    type: 'object',
+    properties: { createdAt: { instanceof: 'Date' } },
+  }))
+  ok('isValidObject: Date accepted', v.isValidObject({ createdAt: new Date() }) === true)
+  ok('isValidObject: non-Date rejected', v.isValidObject({ createdAt: 'nope' }) === false)
+  ok('isValidObject: missing is skipped by keyword', v.isValidObject({}) === true)
+  ok('~standard: non-Date rejected',
+    v['~standard'].validate({ createdAt: 'nope' }).issues !== undefined)
+}
+
+// 10. JSON entry points see the same schema
+{
+  const v = withKeywords(new Validator({
+    type: 'object',
+    properties: { label: { typeof: 'string' } },
+  }))
+  ok('validateJSON: matching typeof accepted', v.validateJSON('{"label":"a"}').valid === true)
+  ok('validateJSON: wrong typeof rejected', v.validateJSON('{"label":3}').valid === false)
+  ok('isValidJSON: matching typeof accepted', v.isValidJSON('{"label":"a"}') === true)
+  ok('isValidJSON: wrong typeof rejected', v.isValidJSON('{"label":3}') === false)
+  ok('validateJSON: invalid JSON still reports invalid', v.validateJSON('{oops').valid === false)
+}
+
+// 11. schemas without custom keywords keep every entry point untouched
+{
+  const v = withKeywords(new Validator({ type: 'object', properties: { n: { type: 'number' } } }))
+  ok('no keywords: isValidObject passes', v.isValidObject({ n: 1 }) === true)
+  ok('no keywords: isValidObject rejects', v.isValidObject({ n: 'x' }) === false)
+  ok('no keywords: isValidJSON passes', v.isValidJSON('{"n":1}') === true)
+}
+
 console.log('ata-keywords: ' + passed + ' assertions passed')
