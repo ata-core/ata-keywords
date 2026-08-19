@@ -4,9 +4,15 @@
   "description": "Custom keywords for ata-validator (instanceof, typeof)",
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
   "license": "MIT",
   "scripts": {
-    "test": "node test.js"
+    "test": "node test.js && npm run test:types",
+    "test:types": "tsc --noEmit -p tsconfig.json"
   },
   "repository": {
     "type": "git",
@@ -23,6 +29,8 @@
     "ata-validator": ">=0.9.3"
   },
   "devDependencies": {
-    "ata-validator": "^1.6.1"
+    "@types/node": "^26.2.0",
+    "ata-validator": "^1.6.2",
+    "typescript": "^7.0.2"
   }
 }

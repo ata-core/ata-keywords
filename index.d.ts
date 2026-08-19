@@ -6,4 +6,9 @@ export interface Constructors {
 
 export declare const CONSTRUCTORS: Constructors
 
-export declare function withKeywords(validator: Validator): Validator
+/**
+ * Add the `instanceof` and `typeof` keywords to a validator. The validator is
+ * returned as it was passed, so its data type carries through and callers keep
+ * whatever `new Validator(...)` inferred for them.
+ */
+export declare function withKeywords<T>(validator: Validator<T>): Validator<T>
