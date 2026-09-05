@@ -141,4 +141,63 @@ function ok(name, cond) {
   ok('no keywords: isValidJSON passes', v.isValidJSON('{"n":1}') === true)
 }
 
+// 12. the keyword check survives the validator installing its own compiled
+// function, whichever entry point runs first
+{
+  for (const first of ['isValidObject', 'validate', 'validateJSON', 'isValidJSON']) {
+    const v = withKeywords(new Validator({
+      type: 'object',
+      properties: { createdAt: { instanceof: 'Date' } },
+    }))
+    if (first === 'validateJSON' || first === 'isValidJSON') v[first]('{"createdAt":null}')
+    else v[first]({ createdAt: new Date() })
+    ok(first + ' first: isValidObject still rejects a non-Date',
+      v.isValidObject({ createdAt: 'nope' }) === false)
+    ok(first + ' first: validate still rejects a non-Date',
+      v.validate({ createdAt: 'nope' }).valid === false)
+    ok(first + ' first: a Date is still accepted',
+      v.isValidObject({ createdAt: new Date() }) === true)
+  }
+}
+
+// 13. a value that breaks both the schema and a custom keyword reports both
+{
+  const v = withKeywords(new Validator({
+    type: 'object',
+    properties: { createdAt: { instanceof: 'Date' }, n: { type: 'number' } },
+    required: ['n'],
+  }))
+  const res = v.validate({ createdAt: 'nope', n: 'x' })
+  ok('both broken: invalid', res.valid === false)
+  ok('both broken: the schema error is reported',
+    res.errors.some((e) => e.keyword !== 'instanceof'))
+  ok('both broken: the keyword error is reported',
+    res.errors.some((e) => e.keyword === 'instanceof'))
+}
+
+// 14. the schema rejecting on its own still rejects, keywords clean
+{
+  const v = withKeywords(new Validator({
+    type: 'object',
+    properties: { createdAt: { instanceof: 'Date' }, n: { type: 'number' } },
+  }))
+  const res = v.validate({ createdAt: new Date(), n: 'x' })
+  ok('schema-only failure: invalid', res.valid === false)
+  ok('schema-only failure: no keyword error', res.errors.every((e) => e.keyword !== 'instanceof'))
+  ok('schema-only failure: isValidObject agrees', v.isValidObject({ createdAt: new Date(), n: 'x' }) === false)
+}
+
+// 15. a validator that rewrites its input keeps the keywords
+{
+  const v = withKeywords(new Validator({
+    type: 'object',
+    properties: { createdAt: { instanceof: 'Date' }, n: { type: 'number', default: 7 } },
+  }, { coerceTypes: true, useDefaults: true }))
+  const res = v.validate({ createdAt: new Date() })
+  ok('coerceTypes: valid data passes', res.valid)
+  ok('coerceTypes: default applied', res.data.n === 7)
+  ok('coerceTypes: non-Date rejected', v.validate({ createdAt: 'nope' }).valid === false)
+  ok('coerceTypes: isValidObject agrees', v.isValidObject({ createdAt: 'nope' }) === false)
+}
+
 console.log('ata-keywords: ' + passed + ' assertions passed')

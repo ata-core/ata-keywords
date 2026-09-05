@@ -127,6 +127,258 @@ function runOps(value, ops, path, errors) {
   }
 }
 
+// Validation time: a closure tree built once from the ops. It answers with a
+// boolean and allocates nothing, so a value that satisfies the keywords costs
+// only the property reads it takes to reach them. The error walk above runs
+// only after this one has said no.
+function buildCheck(ops) {
+  const checks = []
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i]
+    if (op.type === 'instanceof') {
+      const ctors = op.ctors
+      if (ctors.length === 1) {
+        const C = ctors[0]
+        checks.push((v) => v instanceof C)
+      } else {
+        checks.push((v) => {
+          for (let j = 0; j < ctors.length; j++) if (v instanceof ctors[j]) return true
+          return false
+        })
+      }
+    } else if (op.type === 'typeof') {
+      const types = op.types
+      if (types.length === 1) {
+        const t = types[0]
+        checks.push((v) => typeof v === t)
+      } else {
+        checks.push((v) => {
+          for (let j = 0; j < types.length; j++) if (typeof v === types[j]) return true
+          return false
+        })
+      }
+    } else if (op.type === 'prop') {
+      const key = op.key
+      const child = buildCheck(op.ops)
+      checks.push((v) => {
+        if (v === null || typeof v !== 'object') return true
+        const inner = v[key]
+        return inner === undefined ? true : child(inner)
+      })
+    } else if (op.type === 'items') {
+      const child = buildCheck(op.ops)
+      checks.push((v) => {
+        if (!Array.isArray(v)) return true
+        for (let k = 0; k < v.length; k++) if (!child(v[k])) return false
+        return true
+      })
+    } else if (op.type === 'prefixItems') {
+      const tuple = op.tuple.map((o) => (o.length > 0 ? buildCheck(o) : null))
+      checks.push((v) => {
+        if (!Array.isArray(v)) return true
+        const n = tuple.length < v.length ? tuple.length : v.length
+        for (let k = 0; k < n; k++) {
+          const c = tuple[k]
+          if (c !== null && !c(v[k])) return false
+        }
+        return true
+      })
+    }
+  }
+  if (checks.length === 1) return checks[0]
+  return (v) => {
+    for (let i = 0; i < checks.length; i++) if (!checks[i](v)) return false
+    return true
+  }
+}
+
+// The fastest form of this check is the one that decides everything before
+// the first value arrives: the ops become source, the paths become plain
+// property reads, and the constructors become locals, so a call runs straight
+// through with no dispatch and no closure per node. Environments that block
+// code generation fall back to buildCheck above, which answers identically.
+function buildSource(ops) {
+  const ctors = []
+  let n = 0
+  const name = () => '_' + n++
+
+  const ctorRef = (C) => {
+    let i = ctors.indexOf(C)
+    if (i === -1) i = ctors.push(C) - 1
+    return 'c' + i
+  }
+
+  const emit = (list, expr) => {
+    let out = ''
+    for (let i = 0; i < list.length; i++) {
+      const op = list[i]
+      if (op.type === 'instanceof') {
+        const test = op.ctors.map((C) => expr + ' instanceof ' + ctorRef(C)).join('||')
+        out += 'if(!(' + test + '))return false\n'
+      } else if (op.type === 'typeof') {
+        const test = op.types.map((t) => 'typeof ' + expr + '===' + JSON.stringify(t)).join('||')
+        out += 'if(!(' + test + '))return false\n'
+      } else if (op.type === 'prop') {
+        const v = name()
+        out += 'if(' + expr + '!==null&&typeof ' + expr + "==='object'){"
+        out += 'const ' + v + '=' + expr + '[' + JSON.stringify(op.key) + ']\n'
+        out += 'if(' + v + '!==undefined){\n' + emit(op.ops, v) + '}}\n'
+      } else if (op.type === 'items') {
+        const k = name()
+        const e = name()
+        out += 'if(Array.isArray(' + expr + ')){'
+        out += 'for(let ' + k + '=0;' + k + '<' + expr + '.length;' + k + '++){'
+        out += 'const ' + e + '=' + expr + '[' + k + ']\n' + emit(op.ops, e) + '}}\n'
+      } else if (op.type === 'prefixItems') {
+        for (let j = 0; j < op.tuple.length; j++) {
+          if (op.tuple[j].length === 0) continue
+          const e = name()
+          out += 'if(Array.isArray(' + expr + ')&&' + expr + '.length>' + j + '){'
+          out += 'const ' + e + '=' + expr + '[' + j + ']\n' + emit(op.tuple[j], e) + '}\n'
+        }
+      }
+    }
+    return out
+  }
+
+  const body = emit(ops, 'd')
+  const head = ctors.map((_, i) => 'const c' + i + '=C[' + i + ']').join('\n')
+  try {
+    // eslint-disable-next-line no-new-func
+    const make = new Function('C', head + '\nreturn function(d){\n' + body + 'return true\n}')
+    return make(ctors)
+  } catch {
+    // Content-Security-Policy, or any other place new Function is refused.
+    return null
+  }
+}
+
+// Wrapping an entry point has to survive the validator installing its own
+// compiled function on the instance, which it does on the first call and again
+// when the full compile runs. An accessor keeps the wrapper in the slot and
+// lets those assignments land in `impl` instead.
+//
+// Every entry point settles together, on the first use of any of them: the
+// accessors come off, one probe call per entry point lets the validator finish
+// swapping itself in, and then they go back on. Settling them one at a time
+// would let the validator wrap a wrapper, and that recurses forever.
+const ENTRIES = [
+  ['validate', {}],
+  ['isValidObject', {}],
+  ['validateJSON', '{}'],
+  ['isValidJSON', '{}'],
+  ['validateAndParse', '{}'],
+]
+
+function installEntries(validator, make) {
+  const slots = new Map()
+  const state = { depth: 0, settled: false }
+
+  // Read the descriptor rather than the method: the validator defines its
+  // entry points as lazy accessors, and touching one here would build a stub
+  // this wrapper does not need until something actually validates.
+  const proto = Object.getPrototypeOf(validator)
+  for (let i = 0; i < ENTRIES.length; i++) {
+    const name = ENTRIES[i][0]
+    const own = Object.getOwnPropertyDescriptor(validator, name)
+    const desc = own || (proto ? Object.getOwnPropertyDescriptor(proto, name) : undefined)
+    if (!desc) continue
+    const value = 'value' in desc ? desc.value : undefined
+    if (value !== undefined && typeof value !== 'function') continue
+    slots.set(name, { probe: ENTRIES[i][1], impl: value, call: null })
+  }
+
+  function define(name) {
+    const slot = slots.get(name)
+    Object.defineProperty(validator, name, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        if (!state.settled) settle()
+        return slot.call
+      },
+      set(fn) {
+        slot.impl = fn
+      },
+    })
+  }
+
+  function settle() {
+    state.settled = true
+    for (const [name, slot] of slots) {
+      delete validator[name]
+      if (slot.impl !== undefined) validator[name] = slot.impl
+    }
+    for (const [name, slot] of slots) {
+      try {
+        validator[name](slot.probe)
+      } catch {
+        // Entry points that need the native addon throw when it is absent.
+        // Wrap them anyway: calling one keeps throwing either way.
+      }
+      slot.impl = validator[name]
+    }
+    for (const name of slots.keys()) {
+      delete validator[name]
+      define(name)
+    }
+  }
+
+  for (const [name, slot] of slots) {
+    const wrapper = make(name, (data) => slot.impl(data))
+    slot.call = function (data) {
+      // A nested call the validator makes into itself has already been through
+      // the keywords; give it the plain implementation.
+      if (state.depth > 0) return slot.impl(data)
+      state.depth++
+      try {
+        return wrapper(data)
+      } finally {
+        state.depth--
+      }
+    }
+    define(name)
+  }
+}
+
+// A failing value gets its errors built only if somebody asks. The validator
+// itself answers `valid` without building a list, and a caller that stops
+// there should not pay for one because a custom keyword also failed.
+function KeywordResult(inner, data, collect) {
+  this.valid = false
+  this._inner = inner
+  this._data = data
+  this._collect = collect
+  this._errors = null
+}
+
+Object.defineProperty(KeywordResult.prototype, 'errors', {
+  configurable: true,
+  get() {
+    if (this._errors === null) {
+      const errors = this._collect(this._data) || []
+      const inner = this._inner
+      this._errors = inner.valid ? errors : inner.errors.concat(errors)
+    }
+    return this._errors
+  },
+})
+
+KeywordResult.prototype.toJSON = function () {
+  return { valid: false, errors: this.errors }
+}
+
+// Raw shape for consumers that carry only message and path, mirroring the
+// validator's own rejection: its raw list when it offers one, the keyword
+// errors appended, no enrichment for anybody.
+KeywordResult.prototype._ataRaw = function () {
+  const inner = this._inner
+  const kw = this._collect(this._data) || []
+  if (inner.valid) return kw
+  const raw = typeof inner._ataRaw === 'function' ? inner._ataRaw() : inner.errors
+  return raw.concat(kw)
+}
+
 function withKeywords(validator) {
   const schema = validator._schemaObj
 
@@ -139,76 +391,57 @@ function withKeywords(validator) {
     return validator
   }
 
-  // Warm each entry point before capturing it. A validator installs its
-  // compiled function on the instance during the first call, so a function
-  // captured earlier is the lazy stub, and that stub would overwrite this
-  // wrapper the first time it ran.
-  const inner = {}
-  for (const name of ['validate', 'isValidObject', 'validateJSON', 'isValidJSON', 'validateAndParse']) {
-    if (typeof validator[name] !== 'function') continue
-    try {
-      validator[name](name === 'validate' || name === 'isValidObject' ? {} : '{}')
-    } catch {
-      // Entry points that need the native addon throw when it is absent.
-      // Leave those alone rather than wrapping a function nobody can call.
-      continue
-    }
-    inner[name] = validator[name]
-  }
+  const check = buildSource(ops) || buildCheck(ops)
 
-  // Shared by every entry point: the custom keywords decide first, and only a
-  // clean pass hands the value to the validator itself.
   function keywordErrors(data) {
-    if (data === null || typeof data !== 'object') return null
     const errors = []
     runOps(data, ops, '', errors)
     return errors.length > 0 ? errors : null
   }
 
-  validator.validate = function (data) {
-    const errors = keywordErrors(data)
-    if (errors) return { valid: false, errors }
-    return inner.validate(data)
-  }
-
-  if (inner.isValidObject) {
-    validator.isValidObject = function (data) {
-      if (keywordErrors(data)) return false
-      return inner.isValidObject(data)
-    }
-  }
-
-  // The JSON entry points take text, so the parsed value is what the keywords
-  // have to see. Parsing happens only after the schema itself accepts, which
-  // keeps the cost off the rejecting path.
-  if (inner.validateJSON) {
-    validator.validateJSON = function (jsonStr) {
-      const res = inner.validateJSON(jsonStr)
+  // The schema itself answers first. It rejects inside one compiled function
+  // that stops at the first failing keyword, so a value it turns down never
+  // pays for the custom keyword walk at all. When it accepts, the keyword
+  // check runs as a boolean and only a failure builds errors. A value that
+  // breaks both still reports both, so nothing surfaces later than it did.
+  const wrappers = {
+    validate: (inner) => (data) => {
+      const res = inner(data)
+      // A value the schema already turned down does not need the keyword walk
+      // to know the answer, only to report it, and the result below runs that
+      // walk when somebody reads the errors.
+      if (res.valid && check(data)) return res
+      return new KeywordResult(res, data, keywordErrors)
+    },
+    isValidObject: (inner) => (data) => inner(data) && check(data),
+    // The JSON entry points take text, so the parsed value is what the
+    // keywords have to see. Parsing happens only after the schema itself
+    // accepts, which keeps the cost off the rejecting path.
+    validateJSON: (inner) => (jsonStr) => {
+      const res = inner(jsonStr)
       if (!res.valid) return res
       let data
       try { data = JSON.parse(jsonStr) } catch { return res }
+      if (check(data)) return res
       const errors = keywordErrors(data)
       return errors ? { valid: false, errors } : res
-    }
-  }
-
-  if (inner.isValidJSON) {
-    validator.isValidJSON = function (jsonStr) {
-      if (!inner.isValidJSON(jsonStr)) return false
+    },
+    isValidJSON: (inner) => (jsonStr) => {
+      if (!inner(jsonStr)) return false
       let data
       try { data = JSON.parse(jsonStr) } catch { return true }
-      return !keywordErrors(data)
-    }
-  }
-
-  if (inner.validateAndParse) {
-    validator.validateAndParse = function (jsonStr) {
-      const res = inner.validateAndParse(jsonStr)
+      return check(data)
+    },
+    validateAndParse: (inner) => (jsonStr) => {
+      const res = inner(jsonStr)
       if (!res.valid) return res
+      if (check(res.value)) return res
       const errors = keywordErrors(res.value)
       return errors ? { valid: false, value: res.value, errors } : res
-    }
+    },
   }
+
+  installEntries(validator, (name, inner) => wrappers[name](inner))
 
   return validator
 }

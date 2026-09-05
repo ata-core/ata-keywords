@@ -90,6 +90,23 @@ The JSON entry points check the parsed value, so `instanceof` on JSON text
 rejects: parsed JSON holds plain objects, never class instances. Use `typeof`
 for constraints that JSON input can satisfy.
 
+### What it costs
+
+The schema itself answers first, inside its own compiled function, so a value
+the schema turns down never pays for the custom keyword walk. When the schema
+accepts, the keywords run as one generated function that allocates nothing and
+reads only the properties they constrain; where code generation is blocked, a
+tree of closures answers identically. Errors are built only once a value has
+already failed, and a value that breaks both the schema and a custom keyword
+reports both.
+
+On the schema from the schema-benchmarks product case, which carries fifteen
+`instanceof: 'Date'` checks across nested objects and arrays, wrapping a
+validator costs about 6 us at construction, and nothing is compiled until the
+first call. Validating a value the schema accepts costs up to 25 ns more than
+the bare validator, and validating one it rejects costs about 9 ns more.
+Measured on an M-series Mac with Node 25.
+
 ### Custom constructors
 
 ```js
