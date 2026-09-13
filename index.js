@@ -392,7 +392,6 @@ KeywordResult.prototype._ataRaw = function () {
 }
 
 function withKeywords(validator) {
-  const schema = validator._schemaObj
 
   // Nothing is compiled here. The schema walk, the generated check and the
   // constructor lookups all wait for the first entry point to be used, so
@@ -403,7 +402,9 @@ function withKeywords(validator) {
   let compiled = null // null: not yet; false: no custom keyword; else { ops, check }
   const compile = () => {
     if (compiled === null) {
-      const ops = compileNode(schema)
+      // Read the schema here, not at wrap time: the validator normalizes it
+      // on first read, and wrapping should not be what triggers that.
+      const ops = compileNode(validator._schemaObj)
       compiled = ops.length === 0 ? false : { ops, check: buildSource(ops) || buildCheck(ops) }
     }
     return compiled
