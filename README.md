@@ -37,6 +37,22 @@ v.validate({ name: 'Mert', createdAt: 'not a date' })
 
 `withKeywords()` compiles nothing at the time it is called. The schema walk, the generated check and the constructor lookups run on the first use of any entry point, so wrapping a validator costs a few accessors and about a microsecond; a constructor added to `withKeywords.CONSTRUCTORS` after wrapping and before the first call is used. A schema with no custom keyword settles to the validator's own entry points on that first call and pays nothing per call after.
 
+## Ahead-of-time compilation
+
+`instanceof` and `typeof` have no JSON Schema spelling, so `ata build` and
+`toStandaloneModule()` cannot carry them: a standalone module is generated from
+the schema alone. A wrapped validator therefore refuses to compile rather than
+emitting a module that accepts what the validator rejects.
+
+```
+toStandaloneModule: this validator enforces checks that are not in its schema,
+so a standalone module would be weaker than the validator it came from.
+```
+
+Compile the validator before wrapping it if the extra checks are not needed on
+that path. Older ata versions emitted the weaker module without saying so, so
+this needs ata-validator 1.20.0 or newer to be reported.
+
 ## Supported keywords
 
 ### instanceof

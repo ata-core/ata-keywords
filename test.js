@@ -217,4 +217,38 @@ function ok(name, cond) {
   ok('no-keyword schema keeps a plain validate after first use', !desc || typeof desc.get !== 'function')
 }
 
+// A wrapped validator enforces checks its schema does not carry, so ata's
+// ahead-of-time emitters must not turn it into a standalone module: the module
+// is built from the compiled schema alone and would accept documents this
+// validator rejects, with nothing to say it had been weakened. The wrapper is
+// the only thing that knows it wraps, so it declares `_externalChecks` and the
+// emitters read it.
+{
+  const v = withKeywords(new Validator({
+    type: 'object',
+    properties: { created: { instanceof: 'Date' } },
+    required: ['created'],
+  }))
+  ok('a wrapped schema with custom keywords declares external checks', v._externalChecks === true)
+  ok('the wrapped validator rejects what the bare schema accepts', v.isValidObject({ created: {} }) === false)
+
+  const inert = withKeywords(new Validator({ type: 'object', properties: { n: { type: 'number' } } }))
+  ok('a wrapped schema with no custom keyword declares none', inert._externalChecks === false)
+
+  // The refusal itself lives in ata. Older versions have no guard to exercise,
+  // so this asserts it only where it exists rather than pinning a version.
+  let emitters = null
+  try { emitters = require('ata-validator/aot') } catch { /* not exported here */ }
+  if (emitters && emitters.toStandaloneModule) {
+    let threw = null
+    try { emitters.toStandaloneModule(v, { format: 'esm' }) } catch (e) { threw = e }
+    if (threw && /enforces checks that are not in its schema/.test(threw.message)) {
+      ok('ata refuses to emit a standalone module for a wrapped validator', true)
+    } else {
+      console.log('  (installed ata-validator ' + require('ata-validator/package.json').version +
+        ' has no external-checks guard; skipping the refusal assertion)')
+    }
+  }
+}
+
 console.log('ata-keywords: ' + passed + ' assertions passed')

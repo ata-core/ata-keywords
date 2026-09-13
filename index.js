@@ -461,6 +461,17 @@ function withKeywords(validator) {
 
   installEntries(validator, (name, inner) => wrappers[name](inner), () => compile() !== false)
 
+  // Tell ata's ahead-of-time emitters that this instance enforces checks its
+  // schema does not carry. They build a module from the compiled schema alone,
+  // so without this they would emit one that accepts what this validator
+  // rejects, and nothing would say so. Lazy for the same reason the wrapping
+  // is: reading it is what triggers the schema walk, and an emitter is the
+  // only thing that reads it.
+  Object.defineProperty(validator, '_externalChecks', {
+    get: () => compile() !== false,
+    configurable: true,
+  })
+
   return validator
 }
 
