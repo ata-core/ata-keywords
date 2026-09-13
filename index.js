@@ -270,7 +270,7 @@ const ENTRIES = [
   ['validateAndParse', '{}'],
 ]
 
-function installEntries(validator, make) {
+function installEntries(validator, make, shouldWrap) {
   const slots = new Map()
   const state = { depth: 0, settled: false }
 
@@ -317,6 +317,18 @@ function installEntries(validator, make) {
         // Wrap them anyway: calling one keeps throwing either way.
       }
       slot.impl = validator[name]
+    }
+    // A schema with nothing to check keeps the validator's own entry points,
+    // installed as plain properties: no accessor, no wrapper, no cost.
+    if (shouldWrap && !shouldWrap()) {
+      for (const [name, slot] of slots) {
+        delete validator[name]
+        if (slot.impl !== undefined) validator[name] = slot.impl
+        // The accessor that triggered this settle still returns `slot.call`
+        // for the call in flight; hand it the plain implementation too.
+        slot.call = slot.impl
+      }
+      return
     }
     for (const name of slots.keys()) {
       delete validator[name]
@@ -382,22 +394,27 @@ KeywordResult.prototype._ataRaw = function () {
 function withKeywords(validator) {
   const schema = validator._schemaObj
 
-  // Compile ops once — zero overhead at validation time for schemas without
-  // any custom keyword.
-  const ops = compileNode(schema)
-
-  if (ops.length === 0) {
-    // No custom keywords — leave the validator untouched.
-    return validator
+  // Nothing is compiled here. The schema walk, the generated check and the
+  // constructor lookups all wait for the first entry point to be used, so
+  // wrapping costs the accessors and no more, and a constructor registered
+  // between wrapping and the first call is seen. A schema with no custom
+  // keyword resolves to its plain entry points at that point, and pays
+  // nothing per call after.
+  let compiled = null // null: not yet; false: no custom keyword; else { ops, check }
+  const compile = () => {
+    if (compiled === null) {
+      const ops = compileNode(schema)
+      compiled = ops.length === 0 ? false : { ops, check: buildSource(ops) || buildCheck(ops) }
+    }
+    return compiled
   }
-
-  const check = buildSource(ops) || buildCheck(ops)
 
   function keywordErrors(data) {
     const errors = []
-    runOps(data, ops, '', errors)
+    runOps(data, compile().ops, '', errors)
     return errors.length > 0 ? errors : null
   }
+  const check = (data) => compile().check(data)
 
   // The schema itself answers first. It rejects inside one compiled function
   // that stops at the first failing keyword, so a value it turns down never
@@ -441,7 +458,7 @@ function withKeywords(validator) {
     },
   }
 
-  installEntries(validator, (name, inner) => wrappers[name](inner))
+  installEntries(validator, (name, inner) => wrappers[name](inner), () => compile() !== false)
 
   return validator
 }

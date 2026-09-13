@@ -33,6 +33,10 @@ v.validate({ name: 'Mert', createdAt: 'not a date' })
 // { valid: false, errors: [...] }
 ```
 
+## When the work happens
+
+`withKeywords()` compiles nothing at the time it is called. The schema walk, the generated check and the constructor lookups run on the first use of any entry point, so wrapping a validator costs a few accessors and about a microsecond; a constructor added to `withKeywords.CONSTRUCTORS` after wrapping and before the first call is used. A schema with no custom keyword settles to the validator's own entry points on that first call and pays nothing per call after.
+
 ## Supported keywords
 
 ### instanceof

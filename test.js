@@ -200,4 +200,21 @@ function ok(name, cond) {
   ok('coerceTypes: isValidObject agrees', v.isValidObject({ createdAt: 'nope' }) === false)
 }
 
+// Wrapping is lazy: nothing is compiled until an entry point is used, so a
+// constructor registered after withKeywords() and before the first call is
+// honoured, and a schema without custom keywords ends up with its plain
+// entry points, no accessor left behind.
+{
+  class Money {}
+  const v = withKeywords(new Validator({ type: 'object', properties: { price: { instanceof: 'Money' } } }))
+  withKeywords.CONSTRUCTORS.Money = Money
+  ok('constructor registered after wrapping is used', v.validate({ price: new Money() }).valid)
+  ok('constructor registered after wrapping rejects', v.validate({ price: 1 }).valid === false)
+  delete withKeywords.CONSTRUCTORS.Money
+  const plain = withKeywords(new Validator({ type: 'object', properties: { n: { type: 'number' } } }))
+  ok('no-keyword schema validates', plain.validate({ n: 1 }).valid && plain.validate({ n: 'x' }).valid === false)
+  const desc = Object.getOwnPropertyDescriptor(plain, 'validate')
+  ok('no-keyword schema keeps a plain validate after first use', !desc || typeof desc.get !== 'function')
+}
+
 console.log('ata-keywords: ' + passed + ' assertions passed')
