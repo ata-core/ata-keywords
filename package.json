@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "ata-validator": "^1.23.0",
+    "ata-validator": "^1.17.2",
     "typescript": "^7.0.2"
   }
 }
