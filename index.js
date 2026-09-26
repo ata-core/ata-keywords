@@ -350,7 +350,7 @@ const ENTRIES = [
   ['validateAndParse', '{}'],
 ]
 
-function installEntries(validator, make, shouldWrap) {
+function installEntries(validator, make, shouldWrap, skip) {
   const slots = new Map()
   const state = { depth: 0, settled: false }
 
@@ -360,6 +360,7 @@ function installEntries(validator, make, shouldWrap) {
   const proto = Object.getPrototypeOf(validator)
   for (let i = 0; i < ENTRIES.length; i++) {
     const name = ENTRIES[i][0]
+    if (skip && skip.has(name)) continue
     const own = Object.getOwnPropertyDescriptor(validator, name)
     const desc = own || (proto ? Object.getOwnPropertyDescriptor(proto, name) : undefined)
     if (!desc) continue
@@ -471,7 +472,32 @@ KeywordResult.prototype._ataRaw = function () {
   return raw.concat(kw)
 }
 
+// The whole wrapper, for a validator that takes the checks itself (ata-validator
+// with _extendChecks) and has not compiled yet: one resolver, compiled on first
+// use, and nothing installed on the instance.
+function registerChecks(validator) {
+  let compiled = null
+  validator._extendChecks(() => {
+    if (compiled === null) {
+      const ops = compileNode(validator._schemaObj)
+      if (ops.length === 0) {
+        compiled = false
+      } else {
+        const errors = buildErrorsSource(ops) || ((data) => {
+          const out = []
+          runOps(data, ops, '', out)
+          return out.length > 0 ? out : null
+        })
+        compiled = { check: buildSource(ops) || buildCheck(ops), errors }
+      }
+    }
+    return compiled || null
+  })
+  return validator
+}
+
 function withKeywords(validator) {
+  if (typeof validator._extendChecks === 'function' && !validator._initialized) return registerChecks(validator)
 
   // Nothing is compiled here. The schema walk, the generated check and the
   // constructor lookups all wait for the first entry point to be used, so
@@ -541,7 +567,35 @@ function withKeywords(validator) {
     },
   }
 
-  installEntries(validator, (name, inner) => wrappers[name](inner), () => compile() !== false)
+  // A validator that can carry the check inside its own verdict method takes
+  // it there: the check runs where the generated function would return true,
+  // so a value the schema rejects costs exactly what it costs unwrapped, and
+  // no accessor sits in front of the method. The resolver runs when the
+  // validator binds the method, after it has normalized the schema, which is
+  // the same moment the accessors below would have compiled the keywords.
+  const skip = new Set()
+  if (typeof validator._extendVerdict === 'function') {
+    validator._extendVerdict(() => {
+      const c = compile()
+      return c === false ? null : c.check
+    })
+    skip.add('isValidObject')
+  }
+  // The entry points that report errors the same way, when the validator has
+  // not compiled yet. It applies the check to validate() and to the three JSON
+  // entry points itself, so none of them needs an accessor either. That
+  // matters beyond the call it saves: redefining an accessor on the instance
+  // puts the object into V8's dictionary mode, and every property read on it,
+  // `validator.validate` included, becomes a hash lookup.
+  if (typeof validator._extendValidate === 'function' && !validator._initialized) {
+    validator._extendValidate(() => {
+      const c = compile()
+      return c === false ? null : { check: c.check, errors: keywordErrors }
+    })
+    for (const name of ['validate', 'validateJSON', 'isValidJSON', 'validateAndParse']) skip.add(name)
+  }
+
+  installEntries(validator, (name, inner) => wrappers[name](inner), () => compile() !== false, skip)
 
   // Tell ata's ahead-of-time emitters that this instance enforces checks its
   // schema does not carry. They build a module from the compiled schema alone,
