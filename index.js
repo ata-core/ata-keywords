@@ -253,6 +253,86 @@ function buildSource(ops) {
   }
 }
 
+// The error walk as source, for the same reason the check above is: runOps
+// builds the path string of every node it passes, `path + '/' + key`, on the
+// way to finding out whether anything failed there, which on a product with a
+// dozen nested values was most of what reading the keyword errors cost. Here
+// the path is a list of literal parts and loop indexes that is only joined
+// when an error is pushed. The output is runOps' output, error for error.
+function buildErrorsSource(ops) {
+  const ctors = []
+  const typeLists = []
+  let n = 0
+  const name = () => '_' + n++
+
+  const ctorRef = (C) => {
+    let i = ctors.indexOf(C)
+    if (i === -1) i = ctors.push(C) - 1
+    return 'c' + i
+  }
+  const typesRef = (types) => {
+    typeLists.push(types)
+    return 't' + (typeLists.length - 1)
+  }
+  // `parts` alternate between literal text and index variables; adjacent
+  // literals are merged so a static path is a single string constant.
+  const pathExpr = (parts) => {
+    if (parts.length === 0) return '""'
+    return parts.map((p) => (p.v ? p.v : JSON.stringify(p.s))).join('+')
+  }
+  const addLit = (parts, text) => {
+    const last = parts[parts.length - 1]
+    if (last && !last.v) return parts.slice(0, -1).concat({ s: last.s + text })
+    return parts.concat({ s: text })
+  }
+
+  const emit = (list, expr, parts) => {
+    let out = ''
+    for (let i = 0; i < list.length; i++) {
+      const op = list[i]
+      if (op.type === 'instanceof') {
+        const test = op.ctors.map((C) => expr + ' instanceof ' + ctorRef(C)).join('||')
+        out += 'if(!(' + test + '))_e.push(mk("instanceof",' + pathExpr(parts) + ',' + typesRef(op.types) + '))\n'
+      } else if (op.type === 'typeof') {
+        const test = op.types.map((t) => 'typeof ' + expr + '===' + JSON.stringify(t)).join('||')
+        out += 'if(!(' + test + '))_e.push(mk("typeof",' + pathExpr(parts) + ',' + typesRef(op.types) + '))\n'
+      } else if (op.type === 'prop') {
+        const v = name()
+        out += 'if(' + expr + '&&typeof ' + expr + "==='object'){"
+        out += 'const ' + v + '=' + expr + '[' + JSON.stringify(op.key) + ']\n'
+        out += 'if(' + v + '!==undefined){\n' + emit(op.ops, v, addLit(parts, '/' + op.key)) + '}}\n'
+      } else if (op.type === 'items') {
+        const k = name()
+        const e = name()
+        out += 'if(Array.isArray(' + expr + ')){'
+        out += 'for(let ' + k + '=0;' + k + '<' + expr + '.length;' + k + '++){'
+        out += 'const ' + e + '=' + expr + '[' + k + ']\n' + emit(op.ops, e, addLit(parts, '/').concat({ v: k })) + '}}\n'
+      } else if (op.type === 'prefixItems') {
+        const m = name()
+        out += 'if(Array.isArray(' + expr + ')){const ' + m + '=' + expr + '.length\n'
+        for (let j = 0; j < op.tuple.length; j++) {
+          if (op.tuple[j].length === 0) continue
+          const e = name()
+          out += 'if(' + m + '>' + j + '){const ' + e + '=' + expr + '[' + j + ']\n' + emit(op.tuple[j], e, addLit(parts, '/' + j)) + '}\n'
+        }
+        out += '}\n'
+      }
+    }
+    return out
+  }
+
+  const body = emit(ops, 'd', [])
+  const head = ctors.map((_, i) => 'const c' + i + '=C[' + i + ']').join('\n') + '\n' +
+    typeLists.map((_, i) => 'const t' + i + '=T[' + i + ']').join('\n')
+  try {
+    // eslint-disable-next-line no-new-func
+    const make = new Function('C', 'T', 'mk', head + '\nreturn function(d){const _e=[]\n' + body + 'return _e.length>0?_e:null\n}')
+    return make(ctors, typeLists, makeError)
+  } catch {
+    return null
+  }
+}
+
 // Wrapping an entry point has to survive the validator installing its own
 // compiled function on the instance, which it does on the first call and again
 // when the full compile runs. An accessor keeps the wrapper in the slot and
@@ -405,14 +485,16 @@ function withKeywords(validator) {
       // Read the schema here, not at wrap time: the validator normalizes it
       // on first read, and wrapping should not be what triggers that.
       const ops = compileNode(validator._schemaObj)
-      compiled = ops.length === 0 ? false : { ops, check: buildSource(ops) || buildCheck(ops) }
+      compiled = ops.length === 0 ? false : { ops, check: buildSource(ops) || buildCheck(ops), errors: buildErrorsSource(ops) }
     }
     return compiled
   }
 
   function keywordErrors(data) {
+    const c = compile()
+    if (c.errors) return c.errors(data)
     const errors = []
-    runOps(data, compile().ops, '', errors)
+    runOps(data, c.ops, '', errors)
     return errors.length > 0 ? errors : null
   }
   const check = (data) => compile().check(data)
@@ -479,3 +561,5 @@ function withKeywords(validator) {
 withKeywords.CONSTRUCTORS = CONSTRUCTORS
 
 module.exports = { withKeywords, CONSTRUCTORS }
+// For the differential test only: the two error walks it holds together.
+Object.defineProperty(module.exports, '_internals', { value: { compileNode, runOps, buildErrorsSource }, enumerable: false })

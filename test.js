@@ -251,4 +251,57 @@ function ok(name, cond) {
   }
 }
 
+// The keyword errors come from generated source, with runOps as the fallback
+// where code generation is refused. They must be the same list, in the same
+// order, with the same paths, for every schema and value; seeded random
+// schemas and values over the shapes the ops branch on hold them together.
+{
+  const { compileNode, runOps, buildErrorsSource } = require('./index.js')._internals
+  // xorshift: a plain LCG's low bits cycle quickly and would starve the choices.
+  let seed = 0x6b77
+  const rnd = (n) => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) % n }
+  const keys = ['a', 'b', 'c~d', 'e/f', '0']
+  const genSchema = (depth) => {
+    const s = {}
+    const r = rnd(10)
+    if (r < 3) s.instanceof = rnd(2) ? 'Date' : ['Date', 'RegExp']
+    else if (r < 5) s.typeof = rnd(2) ? 'string' : ['number', 'bigint']
+    if (depth > 0) {
+      if (rnd(2)) { s.properties = {}; for (const k of keys) if (rnd(2)) s.properties[k] = genSchema(depth - 1) }
+      if (rnd(3) === 0) s.items = genSchema(depth - 1)
+      if (rnd(4) === 0) s.prefixItems = [genSchema(depth - 1), {}, genSchema(depth - 1)]
+    }
+    return s
+  }
+  const genValue = (depth) => {
+    const r = rnd(9)
+    if (r === 0) return new Date(0)
+    if (r === 1) return /x/
+    if (r === 2) return 'str'
+    if (r === 3) return 7
+    if (r === 4) return null
+    if (r === 5) return 10n
+    if (depth === 0) return undefined
+    if (r === 6) { const a = []; const n = rnd(4); for (let i = 0; i < n; i++) a.push(genValue(depth - 1)); return a }
+    const o = {}; for (const k of keys) if (rnd(2)) o[k] = genValue(depth - 1); return o
+  }
+  let compared = 0, withErrors = 0
+  for (let i = 0; i < 400; i++) {
+    const ops = compileNode(genSchema(3))
+    if (ops.length === 0) continue
+    const compiled = buildErrorsSource(ops)
+    assert.ok(compiled, 'the error walk compiles')
+    for (let j = 0; j < 25; j++) {
+      const value = genValue(3)
+      const ref = []
+      runOps(value, ops, '', ref)
+      const got = compiled(value)
+      assert.deepStrictEqual(got, ref.length > 0 ? ref : null)
+      compared++
+      if (ref.length) withErrors++
+    }
+  }
+  ok('compiled keyword errors match runOps on ' + compared + ' values', compared > 2000 && withErrors > 500)
+}
+
 console.log('ata-keywords: ' + passed + ' assertions passed')
