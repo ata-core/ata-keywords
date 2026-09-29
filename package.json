@@ -1,7 +1,7 @@
 {
   "name": "@ata-project/keywords",
   "version": "0.3.3",
-  "description": "Custom keywords for ata-validator (instanceof, typeof)",
+  "description": "Custom keywords for ata-validator: instanceof and typeof.",
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
